@@ -41,6 +41,8 @@ import com.example.bangerz.ui.player.PlayerViewModel
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
+import com.example.bangerz.ui.components.BangerzButton
+import androidx.compose.ui.text.style.TextAlign
 
 private val CARD_SIZE = 52.dp
 private val SLOT_WIDTH = 14.dp
@@ -62,14 +64,14 @@ fun GameBoardScreen(
         }
     }
 
-    // --- Estado del arrastre (posiciones en coordenadas de pantalla) ---
+    // --- Estado del arrastre (coordenadas de pantalla) ---
     var dragPointer by remember { mutableStateOf<Offset?>(null) }
     var timelineBounds by remember { mutableStateOf<Rect?>(null) }
     val cardCenters = remember { mutableStateMapOf<Int, Float>() }
 
     val currentPlayer = uiState.players.getOrNull(uiState.currentPlayerIndex)
 
-    /** Índice de hueco (0..n) sobre el que está el dedo, o null si está fuera de la línea. */
+    /** Hueco (0..n) bajo el dedo, o null si está fuera de la línea del jugador en turno. */
     fun slotAt(pointer: Offset): Int? {
         val bounds = timelineBounds ?: return null
         val timeline = currentPlayer?.timeline ?: return null
@@ -79,10 +81,18 @@ fun GameBoardScreen(
 
     val hoverSlot = dragPointer?.let { slotAt(it) }
     val onDragMove: (Offset) -> Unit = { dragPointer = it }
-    val onDragEnd: (Offset?) -> Unit = { pointer ->
-        pointer?.let { slotAt(it) }?.let { gameBoardViewModel.placePendingCard(it) }
+
+    /** Al soltar: la tarjeta del turno o la ficha de un oponente, según quién arrastra. */
+    fun dropHandler(playerId: Int): (Offset?) -> Unit = { pointer ->
+        pointer?.let { slotAt(it) }?.let { slot ->
+            if (playerId == currentPlayer?.id) gameBoardViewModel.placeTurnCard(slot)
+            else gameBoardViewModel.placeOpponentToken(playerId, slot)
+        }
         dragPointer = null
     }
+
+    val turnCardPlaced = uiState.placements.isNotEmpty()
+    val turnCardLocked = uiState.placements.any { !it.isTurnPlayer }
 
     BangerzBackground(background = R.drawable.bg_board) {
         BoxWithConstraints(
@@ -95,7 +105,7 @@ fun GameBoardScreen(
 
             uiState.players.forEachIndexed { index, player ->
                 val isCurrent = index == uiState.currentPlayerIndex
-                // El jugador en turno siempre se sienta abajo (90°), el resto en sentido horario
+                // El jugador en turno siempre abajo (90°), el resto en sentido horario
                 val seat = (index - uiState.currentPlayerIndex + playerCount) % playerCount
                 val angleDeg = 90.0 + (360.0 / playerCount) * seat
                 val angle = Math.toRadians(angleDeg)
@@ -103,10 +113,13 @@ fun GameBoardScreen(
                 val dy = sin(angle)
                 val color = playerColor(player.id)
 
+                val canDragToken = !isCurrent && turnCardPlaced &&
+                        player.tokens > 0 && uiState.placements.none { it.playerId == player.id }
+
                 val confirm: @Composable () -> Unit = {
                     ConfirmButton(
-                        enabled = uiState.pendingIndex != null,
-                        onClick = { /* TODO: siguiente paso (reacciones de otros jugadores + verificación) */ }
+                        enabled = uiState.placements.isNotEmpty() && uiState.resolution == null,
+                        onClick = { gameBoardViewModel.resolveTurn() }
                     )
                 }
 
@@ -116,6 +129,9 @@ fun GameBoardScreen(
                     dx = dx,
                     dy = dy,
                     avatarExtra = if (isCurrent) confirm else null,
+                    dragEnabled = canDragToken,
+                    onDragMove = onDragMove,
+                    onDragEnd = dropHandler(player.id),
                     modifier = Modifier.offset(
                         x = (radiusX.value * dx).dp,
                         y = (radiusY.value * dy).dp
@@ -130,13 +146,21 @@ fun GameBoardScreen(
                 if (isCurrent) {
                     CurrentTimeline(
                         cards = player.timeline,
-                        pendingIndex = uiState.pendingIndex,
+                        placements = uiState.placements,
+                        players = uiState.players,
                         hoverSlot = hoverSlot,
                         color = color,
                         onBounds = { timelineBounds = it },
                         onCardCenter = { id, x -> cardCenters[id] = x },
-                        pendingCard = {
-                            DraggableBackCard(onDragMove = onDragMove, onDragEnd = onDragEnd)
+                        turnCard = {
+                            if (turnCardLocked) {
+                                CardBackView(size = CARD_SIZE)
+                            } else {
+                                DragSource(
+                                    onDragMove = onDragMove,
+                                    onDragEnd = dropHandler(player.id)
+                                ) { CardBackView(size = CARD_SIZE) }
+                            }
                         },
                         modifier = timelineModifier
                     )
@@ -163,27 +187,39 @@ fun GameBoardScreen(
             )
 
             // Tarjeta volteada junto al botón central, lista para arrastrar
-            if (uiState.currentSong != null && uiState.pendingIndex == null) {
-                DraggableBackCard(
-                    onDragMove = onDragMove,
-                    onDragEnd = onDragEnd,
-                    modifier = Modifier.offset(x = 76.dp)
+            if (uiState.currentSong != null && uiState.placements.isEmpty() && uiState.resolution == null) {
+                currentPlayer?.let {
+                    DragSource(
+                        onDragMove = onDragMove,
+                        onDragEnd = dropHandler(it.id),
+                        modifier = Modifier.offset(x = 76.dp)
+                    ) { CardBackView(size = CARD_SIZE) }
+                }
+            }
+            uiState.resolution?.let { res ->
+                ResolutionOverlay(
+                    resolution = res,
+                    onNext = {
+                        gameBoardViewModel.nextTurn()
+                        playerViewModel.stop()
+                    }
                 )
             }
         }
     }
 }
 
-/** Línea de tiempo del jugador en turno: huecos fijos entre tarjetas + tarjeta pendiente. */
+/** Línea de tiempo del jugador en turno: huecos entre tarjetas + lo que hay en la cola. */
 @Composable
 private fun CurrentTimeline(
     cards: List<SongCard>,
-    pendingIndex: Int?,
+    placements: List<Placement>,
+    players: List<PlayerSlot>,
     hoverSlot: Int?,
     color: Color,
     onBounds: (Rect) -> Unit,
     onCardCenter: (Int, Float) -> Unit,
-    pendingCard: @Composable () -> Unit,
+    turnCard: @Composable () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -205,28 +241,62 @@ private fun CurrentTimeline(
                     )
                 }
             }
-            if (pendingIndex == i) pendingCard()
+
+            val queueIndex = placements.indexOfFirst { it.slotIndex == i }
+            if (queueIndex >= 0) {
+                val placement = placements[queueIndex]
+                if (placement.isTurnPlayer) {
+                    turnCard()
+                } else {
+                    val owner = players.firstOrNull { it.id == placement.playerId }
+                    OpponentTokenMarker(
+                        color = playerColor(placement.playerId),
+                        priority = queueIndex,
+                        label = owner?.name.orEmpty()
+                    )
+                }
+            }
+
             if (i < cards.size) {
                 val card = cards[i]
                 Box(
                     Modifier.onGloballyPositioned {
                         onCardCenter(card.songId, it.boundsInRoot().center.x)
                     }
-                ) {
-                    SongCardView(card = card, size = CARD_SIZE)
-                }
+                ) { SongCardView(card = card, size = CARD_SIZE) }
             }
         }
     }
 }
 
-/** Tarjeta volteada que se puede arrastrar; reporta la posición del dedo en pantalla. */
 @Composable
-private fun DraggableBackCard(
+private fun OpponentTokenMarker(color: Color, priority: Int, label: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            modifier = Modifier.size(26.dp).clip(CircleShape).background(color),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "$priority",
+                fontWeight = FontWeight.Bold,
+                fontSize = 12.sp,
+                color = if (color.luminance() > 0.5f) Color.Black else Color.White
+            )
+        }
+        Text(label, color = Color.White, fontSize = 9.sp)
+    }
+}
+
+/** Contenedor arrastrable genérico (tarjeta o ficha). Reporta la posición del dedo en pantalla. */
+@Composable
+private fun DragSource(
     onDragMove: (Offset) -> Unit,
     onDragEnd: (Offset?) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
 ) {
+    val currentOnMove by rememberUpdatedState(onDragMove)
+    val currentOnEnd by rememberUpdatedState(onDragEnd)
     var origin by remember { mutableStateOf(Offset.Zero) }
     var dragOffset by remember { mutableStateOf(Offset.Zero) }
     var pointer by remember { mutableStateOf(Offset.Zero) }
@@ -245,29 +315,27 @@ private fun DraggableBackCard(
                     onDragStart = { start ->
                         dragging = true
                         pointer = origin + start
-                        onDragMove(pointer)
+                        currentOnMove(pointer)
                     },
                     onDrag = { change, amount ->
                         change.consume()
                         dragOffset += amount
                         pointer += amount
-                        onDragMove(pointer)
+                        currentOnMove(pointer)
                     },
                     onDragEnd = {
                         dragging = false
                         dragOffset = Offset.Zero
-                        onDragEnd(pointer)
+                        currentOnEnd(pointer)
                     },
                     onDragCancel = {
                         dragging = false
                         dragOffset = Offset.Zero
-                        onDragEnd(null)
+                        currentOnEnd(null)
                     }
                 )
             }
-    ) {
-        CardBackView(size = CARD_SIZE)
-    }
+    ) { content() }
 }
 
 @Composable
@@ -290,32 +358,35 @@ private fun ConfirmButton(enabled: Boolean, onClick: () -> Unit) {
     }
 }
 
+/** Avatar + fichas. Si dragEnabled, la primera ficha se puede arrastrar a la línea del turno. */
 @Composable
 private fun PlayerWithTokens(
     player: PlayerSlot,
     color: Color,
     dx: Double,
     dy: Double,
-    avatarExtra: (@Composable () -> Unit)? = null,
+    avatarExtra: (@Composable () -> Unit)?,
+    dragEnabled: Boolean,
+    onDragMove: (Offset) -> Unit,
+    onDragEnd: (Offset?) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val avatar: @Composable () -> Unit = {
         Box(contentAlignment = Alignment.Center) {
             PlayerAvatar(player, color)
             if (avatarExtra != null) {
-                // Se coloca a la derecha del avatar sin afectar su posición
                 Box(Modifier.align(Alignment.CenterEnd).offset(x = 72.dp)) { avatarExtra() }
             }
         }
     }
-    val tokenRow: @Composable () -> Unit = {
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            repeat(player.tokens) { TokenChip(color) }
-        }
-    }
-    val tokenColumn: @Composable () -> Unit = {
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            repeat(player.tokens) { TokenChip(color) }
+
+    val tokens: @Composable () -> Unit = {
+        repeat(player.tokens) { i ->
+            if (i == 0 && dragEnabled) {
+                DragSource(onDragMove = onDragMove, onDragEnd = onDragEnd) { TokenChip(color) }
+            } else {
+                TokenChip(color)
+            }
         }
     }
 
@@ -325,7 +396,10 @@ private fun PlayerWithTokens(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            if (dy < 0) { avatar(); tokenRow() } else { tokenRow(); avatar() }
+            val row: @Composable () -> Unit = {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { tokens() }
+            }
+            if (dy < 0) { avatar(); row() } else { row(); avatar() }
         }
     } else {
         Row(
@@ -333,7 +407,10 @@ private fun PlayerWithTokens(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            if (dx < 0) { avatar(); tokenColumn() } else { tokenColumn(); avatar() }
+            val column: @Composable () -> Unit = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) { tokens() }
+            }
+            if (dx < 0) { avatar(); column() } else { column(); avatar() }
         }
     }
 }
@@ -376,6 +453,37 @@ private fun CenterPlayButton(isPlaying: Boolean, onClick: () -> Unit) {
             tint = Color.White,
             modifier = Modifier.size(36.dp)
         )
+    }
+}
+
+@Composable
+private fun ResolutionOverlay(resolution: TurnResolution, onNext: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(20f)
+            .background(Color.Black.copy(alpha = 0.7f))
+            .clickable(enabled = false) {},
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(24.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            SongCardView(card = resolution.song, size = 120.dp)
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = resolution.message,
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.widthIn(max = 220.dp)
+                )
+                Spacer(Modifier.height(16.dp))
+                BangerzButton(text = "Siguiente turno", onClick = onNext)
+            }
+        }
     }
 }
 

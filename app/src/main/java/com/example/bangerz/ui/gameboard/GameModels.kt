@@ -9,6 +9,12 @@ data class SongCard(
     val year: Int
 )
 
+data class TurnResolution(
+    val song: SongCard,
+    val winnerId: Int?,      // null = nadie acertó
+    val message: String
+)
+
 fun SongEntity.toCard() = SongCard(
     songId = id,
     title = title,

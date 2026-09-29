@@ -57,6 +57,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun stop() {
+        exoPlayer.stop()
+        exoPlayer.clearMediaItems()
+        _uiState.value = _uiState.value.copy(currentSongId = null, isPlaying = false)
+    }
+
     override fun onCleared() {
         super.onCleared()
         exoPlayer.release()
