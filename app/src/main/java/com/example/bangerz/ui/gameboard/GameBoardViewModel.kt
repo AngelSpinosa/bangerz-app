@@ -162,16 +162,81 @@ class GameBoardViewModel(
         }
 
         val winnerName = state.players.firstOrNull { it.id == winner?.playerId }?.name
-        val message = when {
+        val baseMessage = when {
             winner == null -> "Nadie acertó. Se descarta la canción."
             winner.isTurnPlayer -> "¡$winnerName acertó! Se queda la tarjeta."
             else -> "¡$winnerName le roba la tarjeta a ${turnPlayer.name}!"
         }
 
+        // ¿Alguien llegó a las 10 tarjetas? (solo una tarjeta cambia de dueño por turno)
+        val gameWinner = updatedPlayers.firstOrNull { it.timeline.size >= WIN_CARDS }
+        val message = if (gameWinner != null) {
+            "$baseMessage\n\n🏆 ¡${gameWinner.name} gana la partida con ${gameWinner.timeline.size} tarjetas!"
+        } else baseMessage
+
         _uiState.value = state.copy(
             players = updatedPlayers,
             placements = emptyList(),
-            resolution = TurnResolution(card, winner?.playerId, message)
+            resolution = TurnResolution(
+                song = card,
+                winnerId = winner?.playerId,
+                message = message,
+                gameWinnerId = gameWinner?.id
+            )
+        )
+    }
+
+    /** El jugador en turno gasta BUY_COST fichas y se queda la canción sin adivinar el año. */
+    fun buyCard(): Boolean {
+        val state = _uiState.value
+        if (state.resolution != null) return false
+        val song = state.currentSong ?: return false
+        val turnPlayer = state.players.getOrNull(state.currentPlayerIndex) ?: return false
+        if (state.placements.any { !it.isTurnPlayer }) return false   // un oponente ya jugó su ficha
+        if (turnPlayer.tokens < BUY_COST) return false
+
+        val card = song.toCard()
+        val updatedPlayers = state.players.map { p ->
+            if (p.id == turnPlayer.id) {
+                p.copy(
+                    tokens = p.tokens - BUY_COST,
+                    timeline = (p.timeline + card).sortedBy { it.year }
+                )
+            } else p
+        }
+
+        val baseMessage = "${turnPlayer.name} gastó $BUY_COST fichas y se queda la tarjeta."
+        val gameWinner = updatedPlayers.firstOrNull { it.timeline.size >= WIN_CARDS }
+        val message = if (gameWinner != null) {
+            "$baseMessage\n\n🏆 ¡${gameWinner.name} gana la partida con ${gameWinner.timeline.size} tarjetas!"
+        } else baseMessage
+
+        _uiState.value = state.copy(
+            players = updatedPlayers,
+            placements = emptyList(),
+            resolution = TurnResolution(
+                song = card,
+                winnerId = turnPlayer.id,
+                message = message,
+                gameWinnerId = gameWinner?.id
+            )
+        )
+        return true
+    }
+
+    /** El jugador en turno dijo bien nombre y artista: gana una ficha (máx. 5, una vez por turno). */
+    fun awardToken() {
+        val state = _uiState.value
+        val resolution = state.resolution ?: return
+        if (resolution.tokenAwarded) return
+        val turnPlayer = state.players.getOrNull(state.currentPlayerIndex) ?: return
+        if (turnPlayer.tokens >= MAX_TOKENS) return
+
+        _uiState.value = state.copy(
+            players = state.players.map {
+                if (it.id == turnPlayer.id) it.copy(tokens = it.tokens + 1) else it
+            },
+            resolution = resolution.copy(tokenAwarded = true)
         )
     }
 
@@ -179,6 +244,7 @@ class GameBoardViewModel(
     fun nextTurn() {
         val state = _uiState.value
         if (state.players.isEmpty()) return
+        if (state.resolution?.gameWinnerId != null) return   // partida terminada
         _uiState.value = state.copy(
             currentPlayerIndex = (state.currentPlayerIndex + 1) % state.players.size,
             placements = emptyList(),

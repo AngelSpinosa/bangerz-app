@@ -20,7 +20,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 private sealed class Screen {
     data object MainMenu : Screen()
     data object PlayerCount : Screen()
-    data class GameBoard(val playerCount: Int) : Screen()
+    data class GameBoard(val playerCount: Int, val gameId: Int) : Screen()
 }
 
 class MainActivity : ComponentActivity() {
@@ -39,6 +39,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             BangerzTheme {
                 var currentScreen by remember { mutableStateOf<Screen>(Screen.MainMenu) }
+                var gameCounter by remember { mutableIntStateOf(0) }
 
                 when (val screen = currentScreen) {
                     is Screen.MainMenu -> MainMenuScreen(
@@ -46,16 +47,20 @@ class MainActivity : ComponentActivity() {
                     )
                     is Screen.PlayerCount -> PlayerCountScreen(
                         onAccept = { count ->
-                            currentScreen = Screen.GameBoard(count)
+                            gameCounter++
+                            currentScreen = Screen.GameBoard(count, gameCounter)
                         }
                     )
                     is Screen.GameBoard -> {
+                        // La key distinta por partida evita reutilizar un ViewModel de una partida anterior
                         val gameBoardViewModel: GameBoardViewModel = viewModel(
+                            key = "game_${screen.gameId}",
                             factory = GameBoardViewModelFactory(repository, screen.playerCount)
                         )
                         GameBoardScreen(
                             gameBoardViewModel = gameBoardViewModel,
-                            playerViewModel = playerViewModel
+                            playerViewModel = playerViewModel,
+                            onExitToMenu = { currentScreen = Screen.MainMenu }
                         )
                     }
                 }

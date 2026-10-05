@@ -43,14 +43,34 @@ import kotlin.math.cos
 import kotlin.math.sin
 import com.example.bangerz.ui.components.BangerzButton
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 
-private val CARD_SIZE = 52.dp
-private val SLOT_WIDTH = 14.dp
+
+// --- Tamaños (ajusta aquí si quieres más grande o más pequeño) ---
+private val CARD_MAX = 64.dp          // tarjeta con pocas cartas en la línea
+private val CARD_MIN = 30.dp          // tarjeta con muchas cartas
+private val PLAY_SIZE = 72.dp
+private val AVATAR_SIZE = 46.dp
+private val TOKEN_SIZE = 24.dp
+private val TOKEN_GAP = 6.dp
+private val GROUP_HALF_HEIGHT = (TOKEN_SIZE + TOKEN_GAP + AVATAR_SIZE) / 2
+private const val SLOT_RATIO = 0.27f   // ancho del hueco respecto a la tarjeta
+private const val MARKER_RATIO = 0.55f // ancho del marcador de ficha respecto a la tarjeta
+
+/** Tamaño de tarjeta para que la línea de tiempo quepa en `available`. */
+private fun fitCardSize(cardUnits: Float, slotCount: Int, available: Dp, maxSize: Dp): Dp {
+    val units = cardUnits + slotCount * SLOT_RATIO
+    return (available / units).coerceAtMost(maxSize).coerceAtLeast(CARD_MIN)
+}
 
 @Composable
 fun GameBoardScreen(
     gameBoardViewModel: GameBoardViewModel,
-    playerViewModel: PlayerViewModel
+    playerViewModel: PlayerViewModel,
+    onExitToMenu: () -> Unit
 ) {
     val uiState by gameBoardViewModel.uiState.collectAsState()
     val playerUiState by playerViewModel.uiState.collectAsState()
@@ -68,6 +88,7 @@ fun GameBoardScreen(
     var dragPointer by remember { mutableStateOf<Offset?>(null) }
     var timelineBounds by remember { mutableStateOf<Rect?>(null) }
     val cardCenters = remember { mutableStateMapOf<Int, Float>() }
+    var showBuyDialog by remember { mutableStateOf(false) }
 
     val currentPlayer = uiState.players.getOrNull(uiState.currentPlayerIndex)
 
@@ -99,9 +120,27 @@ fun GameBoardScreen(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
         ) {
-            val radiusX = maxWidth / 2 - 56.dp
-            val radiusY = maxHeight / 2 - 56.dp
+            val radiusX = maxWidth / 2 - 62.dp
+            val radiusY = maxHeight / 2 - 46.dp
             val playerCount = uiState.players.size
+
+            // Espacio vertical libre entre el botón central y las fichas del jugador en turno
+            val gapTop = PLAY_SIZE / 2
+            val gapBottom = radiusY - GROUP_HALF_HEIGHT
+            val maxCardSize = (gapBottom - gapTop - 6.dp)
+                .coerceAtMost(CARD_MAX).coerceAtLeast(CARD_MIN)
+            val timelineY = (gapTop + gapBottom) / 2
+            val yFactor = timelineY.value / radiusY.value
+
+            // Tarjeta del jugador en turno: se achica según crece su línea
+            // (cuenta la tarjeta nueva y los marcadores de fichas de los oponentes)
+            val turnCards = currentPlayer?.timeline?.size ?: 1
+            val turnCardSize = fitCardSize(
+                cardUnits = turnCards + 1 + (playerCount - 1).coerceAtLeast(0) * MARKER_RATIO,
+                slotCount = turnCards + 1,
+                available = maxWidth * 0.6f,
+                maxSize = maxCardSize
+            )
 
             uiState.players.forEachIndexed { index, player ->
                 val isCurrent = index == uiState.currentPlayerIndex
@@ -122,6 +161,14 @@ fun GameBoardScreen(
                         onClick = { gameBoardViewModel.resolveTurn() }
                     )
                 }
+                val buy: @Composable () -> Unit = {
+                    BuyCardButton(
+                        enabled = uiState.currentSong != null &&
+                                uiState.resolution == null &&
+                                uiState.placements.none { !it.isTurnPlayer },
+                        onClick = { showBuyDialog = true }
+                    )
+                }
 
                 PlayerWithTokens(
                     player = player,
@@ -129,6 +176,7 @@ fun GameBoardScreen(
                     dx = dx,
                     dy = dy,
                     avatarExtra = if (isCurrent) confirm else null,
+                    avatarExtraStart = if (isCurrent) buy else null,
                     dragEnabled = canDragToken,
                     onDragMove = onDragMove,
                     onDragEnd = dropHandler(player.id),
@@ -140,7 +188,7 @@ fun GameBoardScreen(
 
                 val timelineModifier = Modifier.offset(
                     x = (radiusX.value * dx * 0.67).dp,
-                    y = (radiusY.value * dy * 0.55).dp
+                    y = (radiusY.value * dy * yFactor).dp
                 )
 
                 if (isCurrent) {
@@ -150,26 +198,33 @@ fun GameBoardScreen(
                         players = uiState.players,
                         hoverSlot = hoverSlot,
                         color = color,
+                        cardSize = turnCardSize,
                         onBounds = { timelineBounds = it },
                         onCardCenter = { id, x -> cardCenters[id] = x },
                         turnCard = {
                             if (turnCardLocked) {
-                                CardBackView(size = CARD_SIZE)
+                                CardBackView(size = turnCardSize)
                             } else {
                                 DragSource(
                                     onDragMove = onDragMove,
                                     onDragEnd = dropHandler(player.id)
-                                ) { CardBackView(size = CARD_SIZE) }
+                                ) { CardBackView(size = turnCardSize) }
                             }
                         },
                         modifier = timelineModifier
                     )
                 } else {
+                    // Línea de un oponente: tarjetas más chicas cuanto más larga sea
+                    val n = player.timeline.size.coerceAtLeast(1)
+                    val available = if (abs(dx) > abs(dy)) maxHeight * 0.6f else maxWidth * 0.4f
+                    val oppSize = ((available - 4.dp * (n - 1)) / n)
+                        .coerceAtMost(maxCardSize).coerceAtLeast(CARD_MIN)
+
                     Row(
                         modifier = timelineModifier.rotate((angleDeg - 90).toFloat()),
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        player.timeline.forEach { SongCardView(card = it, size = CARD_SIZE) }
+                        player.timeline.forEach { SongCardView(card = it, size = oppSize) }
                     }
                 }
             }
@@ -192,17 +247,62 @@ fun GameBoardScreen(
                     DragSource(
                         onDragMove = onDragMove,
                         onDragEnd = dropHandler(it.id),
-                        modifier = Modifier.offset(x = 76.dp)
-                    ) { CardBackView(size = CARD_SIZE) }
+                        modifier = Modifier.offset(x = PLAY_SIZE / 2 + turnCardSize / 2 + 10.dp)
+                    ) { CardBackView(size = turnCardSize) }
                 }
             }
             uiState.resolution?.let { res ->
                 ResolutionOverlay(
                     resolution = res,
+                    canAwardToken = (currentPlayer?.tokens ?: MAX_TOKENS) < MAX_TOKENS,
+                    onAwardToken = { gameBoardViewModel.awardToken() },
                     onNext = {
                         gameBoardViewModel.nextTurn()
                         playerViewModel.stop()
+                    },
+                    onExit = {
+                        playerViewModel.stop()
+                        onExitToMenu()
                     }
+                )
+            }
+
+            if (showBuyDialog && currentPlayer != null) {
+                val hasEnough = currentPlayer.tokens >= BUY_COST
+                AlertDialog(
+                    onDismissRequest = { showBuyDialog = false },
+                    containerColor = Color(0xFF0A0A0A),
+                    titleContentColor = Color.White,
+                    textContentColor = Color.White,
+                    title = {
+                        Text(if (hasEnough) "¿Adivinar?" else "Fichas insuficientes")
+                    },
+                    text = {
+                        Text(
+                            if (hasEnough)
+                                "Gastarás $BUY_COST fichas BANG para añadir esta canción a tu línea de tiempo sin adivinar su año. ¿Continuar?"
+                            else
+                                "Necesitas $BUY_COST fichas BANG y solo tienes ${currentPlayer.tokens}."
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            if (hasEnough) gameBoardViewModel.buyCard()
+                            showBuyDialog = false
+                        }) {
+                            Text(
+                                if (hasEnough) "Sí, gastar $BUY_COST fichas" else "Entendido",
+                                color = Color.White
+                            )
+                        }
+                    },
+                    dismissButton = if (hasEnough) {
+                        {
+                            TextButton(onClick = { showBuyDialog = false }) {
+                                Text("Cancelar", color = Color.White)
+                            }
+                        }
+                    } else null
                 )
             }
         }
@@ -217,18 +317,22 @@ private fun CurrentTimeline(
     players: List<PlayerSlot>,
     hoverSlot: Int?,
     color: Color,
+    cardSize: Dp,
     onBounds: (Rect) -> Unit,
     onCardCenter: (Int, Float) -> Unit,
     turnCard: @Composable () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val slotWidth = cardSize * SLOT_RATIO
+    val markerSize = (cardSize * MARKER_RATIO).coerceAtLeast(24.dp)
+
     Row(
         modifier = modifier.onGloballyPositioned { onBounds(it.boundsInRoot()) },
         verticalAlignment = Alignment.CenterVertically
     ) {
         for (i in 0..cards.size) {
             Box(
-                modifier = Modifier.width(SLOT_WIDTH).height(CARD_SIZE),
+                modifier = Modifier.width(slotWidth).height(cardSize),
                 contentAlignment = Alignment.Center
             ) {
                 if (hoverSlot == i) {
@@ -252,7 +356,8 @@ private fun CurrentTimeline(
                     OpponentTokenMarker(
                         color = playerColor(placement.playerId),
                         priority = queueIndex,
-                        label = owner?.name.orEmpty()
+                        label = owner?.name.orEmpty(),
+                        size = markerSize
                     )
                 }
             }
@@ -263,27 +368,27 @@ private fun CurrentTimeline(
                     Modifier.onGloballyPositioned {
                         onCardCenter(card.songId, it.boundsInRoot().center.x)
                     }
-                ) { SongCardView(card = card, size = CARD_SIZE) }
+                ) { SongCardView(card = card, size = cardSize) }
             }
         }
     }
 }
 
 @Composable
-private fun OpponentTokenMarker(color: Color, priority: Int, label: String) {
+private fun OpponentTokenMarker(color: Color, priority: Int, label: String, size: Dp) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
-            modifier = Modifier.size(26.dp).clip(CircleShape).background(color),
+            modifier = Modifier.size(size).clip(CircleShape).background(color),
             contentAlignment = Alignment.Center
         ) {
             Text(
                 text = "$priority",
                 fontWeight = FontWeight.Bold,
-                fontSize = 12.sp,
+                fontSize = 14.sp,
                 color = if (color.luminance() > 0.5f) Color.Black else Color.White
             )
         }
-        Text(label, color = Color.White, fontSize = 9.sp)
+        Text(label, color = Color.White, fontSize = 10.sp)
     }
 }
 
@@ -358,6 +463,26 @@ private fun ConfirmButton(enabled: Boolean, onClick: () -> Unit) {
     }
 }
 
+@Composable
+private fun BuyCardButton(enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(Color.Black.copy(alpha = if (enabled) 1f else 0.5f))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+    ) {
+        Text(
+            text = "Adivinar",
+            color = Color.White,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            softWrap = false
+        )
+    }
+}
+
 /** Avatar + fichas. Si dragEnabled, la primera ficha se puede arrastrar a la línea del turno. */
 @Composable
 private fun PlayerWithTokens(
@@ -366,6 +491,7 @@ private fun PlayerWithTokens(
     dx: Double,
     dy: Double,
     avatarExtra: (@Composable () -> Unit)?,
+    avatarExtraStart: (@Composable () -> Unit)? = null,
     dragEnabled: Boolean,
     onDragMove: (Offset) -> Unit,
     onDragEnd: (Offset?) -> Unit,
@@ -376,6 +502,9 @@ private fun PlayerWithTokens(
             PlayerAvatar(player, color)
             if (avatarExtra != null) {
                 Box(Modifier.align(Alignment.CenterEnd).offset(x = 72.dp)) { avatarExtra() }
+            }
+            if (avatarExtraStart != null) {
+                Box(Modifier.align(Alignment.CenterStart).offset(x = (-72).dp)) { avatarExtraStart() }
             }
         }
     }
@@ -394,7 +523,7 @@ private fun PlayerWithTokens(
         Column(
             modifier = modifier,
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+            verticalArrangement = Arrangement.spacedBy(TOKEN_GAP)
         ) {
             val row: @Composable () -> Unit = {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { tokens() }
@@ -418,13 +547,13 @@ private fun PlayerWithTokens(
 @Composable
 private fun PlayerAvatar(player: PlayerSlot, color: Color) {
     Box(
-        modifier = Modifier.size(40.dp).clip(CircleShape).background(color),
+        modifier = Modifier.size(AVATAR_SIZE).clip(CircleShape).background(color),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = player.name,
             fontWeight = FontWeight.Bold,
-            fontSize = 12.sp,
+            fontSize = 14.sp,
             color = if (color.luminance() > 0.5f) Color.Black else Color.White
         )
     }
@@ -432,7 +561,7 @@ private fun PlayerAvatar(player: PlayerSlot, color: Color) {
 
 @Composable
 private fun TokenChip(color: Color) {
-    Box(Modifier.size(20.dp).clip(CircleShape).background(color))
+    Box(Modifier.size(TOKEN_SIZE).clip(CircleShape).background(color))
 }
 
 @Composable
@@ -440,7 +569,7 @@ private fun CenterPlayButton(isPlaying: Boolean, onClick: () -> Unit) {
     val shape = RoundedCornerShape(16.dp)
     Box(
         modifier = Modifier
-            .size(80.dp)
+            .size(PLAY_SIZE)
             .clip(shape)
             .background(Color(0xFF0A0A0A))
             .border(1.dp, Color.White, shape)
@@ -451,19 +580,28 @@ private fun CenterPlayButton(isPlaying: Boolean, onClick: () -> Unit) {
             imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
             contentDescription = if (isPlaying) "Pausar" else "Reproducir",
             tint = Color.White,
-            modifier = Modifier.size(36.dp)
+            modifier = Modifier.size(32.dp)
         )
     }
 }
 
 @Composable
-private fun ResolutionOverlay(resolution: TurnResolution, onNext: () -> Unit) {
+private fun ResolutionOverlay(
+    resolution: TurnResolution,
+    canAwardToken: Boolean,
+    onAwardToken: () -> Unit,
+    onNext: () -> Unit,
+    onExit: () -> Unit
+) {
+    val smallPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+    val gameOver = resolution.gameWinnerId != null
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .zIndex(20f)
             .background(Color.Black.copy(alpha = 0.7f))
-            .clickable(enabled = false) {},
+            .pointerInput(Unit) { detectTapGestures { } },   // bloquea toques al tablero
         contentAlignment = Alignment.Center
     ) {
         Row(
@@ -478,10 +616,37 @@ private fun ResolutionOverlay(resolution: TurnResolution, onNext: () -> Unit) {
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
-                    modifier = Modifier.widthIn(max = 220.dp)
+                    modifier = Modifier.widthIn(max = 260.dp)
                 )
                 Spacer(Modifier.height(16.dp))
-                BangerzButton(text = "Siguiente turno", onClick = onNext)
+                if (gameOver) {
+                    BangerzButton(
+                        text = "Volver al menú",
+                        onClick = onExit,
+                        fontSize = 14.sp,
+                        contentPadding = smallPadding
+                    )
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        BangerzButton(
+                            text = when {
+                                resolution.tokenAwarded -> "Ficha ganada ✓"
+                                !canAwardToken -> "Fichas al máximo"
+                                else -> "Ganar ficha"
+                            },
+                            onClick = onAwardToken,
+                            enabled = !resolution.tokenAwarded && canAwardToken,
+                            fontSize = 14.sp,
+                            contentPadding = smallPadding
+                        )
+                        BangerzButton(
+                            text = "Siguiente turno",
+                            onClick = onNext,
+                            fontSize = 14.sp,
+                            contentPadding = smallPadding
+                        )
+                    }
+                }
             }
         }
     }
